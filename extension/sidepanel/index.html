@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Opero Assistant</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="panel">
+    <!-- Header -->
+    <div class="header">
+      <h1 class="logo">Opero</h1>
+      <div id="status" class="status disconnected">
+        <span class="status-dot"></span>
+        <span class="status-text">Disconnected</span>
+      </div>
+    </div>
+
+    <!-- Chat Area -->
+    <div id="chat" class="chat">
+      <div class="message assistant">
+        <p>👋 Hi! I'm Opero, your AI assistant for completing tasks on websites.</p>
+        <p>What would you like to do?</p>
+      </div>
+    </div>
+
+    <!-- Action Log -->
+    <div id="log-container" class="log-container hidden">
+      <div class="log-header">
+        <span>🔄 Activity Log</span>
+        <button id="toggle-log" class="toggle-btn">Hide</button>
+      </div>
+      <div id="log" class="log"></div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <textarea 
+        id="user-input" 
+        placeholder="Tell me what you want to do..."
+        rows="2"
+      ></textarea>
+      <div class="input-actions">
+        <button id="voice-btn" class="voice-btn" title="Voice Input">
+          🎤
+        </button>
+        <button id="send-btn" class="send-btn">Send</button>
+      </div>
+    </div>
+
+    <!-- Control Buttons -->
+    <div id="controls" class="controls hidden">
+      <button id="pause-btn" class="control-btn pause">⏸️ Pause</button>
+      <button id="resume-btn" class="control-btn resume hidden">▶️ Resume</button>
+      <button id="takeover-btn" class="control-btn takeover">✋ Take Control</button>
+    </div>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

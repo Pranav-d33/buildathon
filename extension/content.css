@@ -1,0 +1,188 @@
+/* Content Script Styles */
+
+/* ============ Agent Presence Border ============ */
+/* Persistent overlay that communicates agent state */
+
+#opero-agent-border {
+  position: fixed !important;
+  inset: 0 !important;
+  pointer-events: none !important;
+  border: 4px solid rgba(168, 85, 247, 0.3) !important;
+  z-index: 2147483646 !important;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, border-width 0.3s ease !important;
+  box-sizing: border-box !important;
+  border-radius: 2px !important;
+}
+
+/* Idle State (Default) - Present but not acting */
+#opero-agent-border.opero-idle {
+  border-color: rgba(168, 85, 247, 0.3) !important;
+  box-shadow: none !important;
+}
+
+/* Active State - Agent is executing actions */
+#opero-agent-border.opero-active {
+  border-color: #a855f7 !important;
+  animation: operoBorderPulse 1.5s ease-in-out infinite !important;
+}
+
+/* Paused State - Waiting for user input */
+#opero-agent-border.opero-paused {
+  border-color: #f5a623 !important;
+  box-shadow: inset 0 0 12px rgba(245, 166, 35, 0.4) !important;
+}
+
+/* Error State - Something went wrong */
+#opero-agent-border.opero-error {
+  border-color: #ff4d4f !important;
+  animation: operoBorderFlash 0.5s ease-out !important;
+}
+
+/* Supported State - Opero can fully automate this site */
+#opero-agent-border.opero-supported {
+  border-color: #a855f7 !important;
+  border-width: 5px !important;
+  box-shadow: inset 0 0 20px rgba(168, 85, 247, 0.4), 0 0 30px rgba(168, 85, 247, 0.3) !important;
+  animation: operoBorderSupported 2s ease-in-out infinite !important;
+}
+
+/* Pulse animation for active state */
+@keyframes operoBorderPulse {
+  0% {
+    box-shadow: inset 0 0 8px rgba(168, 85, 247, 0.4);
+  }
+
+  50% {
+    box-shadow: inset 0 0 20px rgba(168, 85, 247, 0.8);
+  }
+
+  100% {
+    box-shadow: inset 0 0 8px rgba(168, 85, 247, 0.4);
+  }
+}
+
+/* Supported site animation - prominent glow */
+@keyframes operoBorderSupported {
+  0% {
+    box-shadow: inset 0 0 15px rgba(168, 85, 247, 0.3), 0 0 20px rgba(168, 85, 247, 0.2);
+  }
+
+  50% {
+    box-shadow: inset 0 0 25px rgba(168, 85, 247, 0.5), 0 0 40px rgba(168, 85, 247, 0.4);
+  }
+
+  100% {
+    box-shadow: inset 0 0 15px rgba(168, 85, 247, 0.3), 0 0 20px rgba(168, 85, 247, 0.2);
+  }
+}
+
+/* Flash animation for error state */
+@keyframes operoBorderFlash {
+  0% {
+    box-shadow: inset 0 0 30px rgba(255, 77, 79, 0.8);
+  }
+
+  100% {
+    box-shadow: none;
+  }
+}
+
+/* ============ Element Spotlight ============ */
+/* Highlights element being acted upon */
+
+.opero-spotlight {
+  position: relative !important;
+}
+
+.opero-spotlight::before {
+  content: '' !important;
+  position: absolute !important;
+  inset: -4px !important;
+  border: 2px solid #a855f7 !important;
+  border-radius: 4px !important;
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.6) !important;
+  pointer-events: none !important;
+  animation: operoSpotlightPulse 1s ease-in-out infinite !important;
+  z-index: 2147483645 !important;
+}
+
+@keyframes operoSpotlightPulse {
+
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ============ Existing Styles ============ */
+
+.opero-highlight {
+  outline: 3px solid #a855f7 !important;
+  outline-offset: 2px;
+  animation: opero-pulse 1s ease-in-out;
+}
+
+@keyframes opero-pulse {
+  0% {
+    outline-color: #a855f7;
+  }
+
+  50% {
+    outline-color: #ec4899;
+  }
+
+  100% {
+    outline-color: #a855f7;
+  }
+}
+
+/* Floating Button */
+#opero-fab {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  width: 56px !important;
+  height: 56px !important;
+  border-radius: 50% !important;
+  background: linear-gradient(135deg, #a855f7, #ec4899) !important;
+  border: none !important;
+  cursor: pointer !important;
+  box-shadow: 0 4px 20px rgba(168, 85, 247, 0.4) !important;
+  z-index: 2147483647 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transition: transform 0.2s, box-shadow 0.2s !important;
+  font-size: 24px !important;
+}
+
+#opero-fab:hover {
+  transform: scale(1.1) !important;
+  box-shadow: 0 6px 28px rgba(168, 85, 247, 0.6) !important;
+}
+
+#opero-fab-tooltip {
+  position: fixed !important;
+  bottom: 90px !important;
+  right: 24px !important;
+  background: #1a1a2e !important;
+  color: white !important;
+  padding: 8px 16px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+  z-index: 2147483647 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 0.2s !important;
+}
+
+#opero-fab:hover+#opero-fab-tooltip,
+#opero-fab-tooltip.show {
+  opacity: 1 !important;
+}
