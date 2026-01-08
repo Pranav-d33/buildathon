@@ -2,12 +2,11 @@
 // AI decides what actions to take based on context and user intent
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
-//moonshotai/kimi-k2:free
-// Model constants
+// Model constants - Using free models from OpenRouter
 export const MODELS = {
-    CONVERSATION: 'meta-llama/llama-3.1-405b-instruct:free',
-    PLANNER: 'meta-llama/llama-3.1-405b-instruct:free',
-    VISION: 'nvidia/nemotron-nano-12b-v2-vl:free'
+    CONVERSATION: 'deepseek/deepseek-chat:free',
+    PLANNER: 'mistralai/mistral-small-3.1-24b-instruct:free',
+    VISION: 'google/gemini-2.0-flash-exp:free'
 } as const
 
 type Message = {

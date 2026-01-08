@@ -544,6 +544,321 @@ function getFullContext() {
     };
 }
 
+// ============ Browser-Use Compatible Scanning (for Agent Module) ============
+
+/**
+ * Scan interactive elements in browser-use compatible format (RawElementData)
+ * This produces data matching the agent module's expected input
+ */
+function scanForAgent() {
+    const INTERACTIVE_SELECTORS = [
+        'a[href]',
+        'button',
+        'input:not([type="hidden"])',
+        'textarea',
+        'select',
+        '[role="button"]',
+        '[role="link"]',
+        '[role="checkbox"]',
+        '[role="textbox"]',
+        '[role="combobox"]',
+        '[role="menuitem"]',
+        '[role="tab"]',
+        '[role="switch"]',
+        '[role="slider"]',
+        '[tabindex]:not([tabindex="-1"])',
+        '[onclick]',
+        '[contenteditable="true"]'
+    ].join(', ');
+
+    const elements = document.querySelectorAll(INTERACTIVE_SELECTORS);
+    const rawElements = [];
+    let backendNodeId = 1;
+
+    elements.forEach(el => {
+        const rect = el.getBoundingClientRect();
+
+        // Skip invisible elements
+        if (rect.width === 0 || rect.height === 0) return;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+
+        // Skip hidden elements
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        if (parseFloat(style.opacity) < 0.1) return;
+
+        // Build attributes object
+        const attributes = {};
+        const relevantAttrs = [
+            'id', 'name', 'type', 'value', 'placeholder', 'href',
+            'role', 'aria-label', 'aria-expanded', 'aria-checked',
+            'aria-valuenow', 'aria-valuemin', 'aria-valuemax',
+            'checked', 'disabled', 'required', 'readonly',
+            'min', 'max', 'step', 'multiple', 'accept', 'pattern'
+        ];
+
+        relevantAttrs.forEach(attr => {
+            const val = el.getAttribute(attr);
+            if (val !== null && val !== undefined) {
+                attributes[attr] = val;
+            }
+        });
+
+        // Handle boolean attributes
+        if (el.checked) attributes.checked = 'true';
+        if (el.disabled) attributes.disabled = 'true';
+        if (el.required) attributes.required = 'true';
+
+        // Get text content
+        let textContent = '';
+        if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+            textContent = el.value || el.placeholder || '';
+        } else if (el.tagName === 'SELECT') {
+            const selected = el.options[el.selectedIndex];
+            textContent = selected ? selected.text : '';
+        } else {
+            // Get visible text, excluding nested interactive elements
+            const clone = el.cloneNode(true);
+            const nested = clone.querySelectorAll('button, a, input, select, textarea');
+            nested.forEach(n => n.remove());
+            textContent = clone.textContent?.trim() || '';
+        }
+
+        // Add label as attribute for form elements
+        const label = findLabel(el);
+        if (label) {
+            attributes['aria-label'] = attributes['aria-label'] || label;
+        }
+
+        rawElements.push({
+            tagName: el.tagName,
+            textContent: textContent.slice(0, 200), // Cap length
+            attributes,
+            rect: {
+                x: Math.round(rect.x),
+                y: Math.round(rect.y),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height)
+            },
+            selector: generateSelector(el),
+            backendNodeId: backendNodeId++,
+            isVisible: true
+        });
+    });
+
+    return rawElements;
+}
+
+/**
+ * Get viewport info for agent
+ */
+function getViewportInfo() {
+    return {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        scrollHeight: document.documentElement.scrollHeight,
+        scrollWidth: document.documentElement.scrollWidth
+    };
+}
+
+// ============ Accessibility Tree Scanning ============
+
+// Implicit ARIA roles for semantic HTML
+const IMPLICIT_ROLES = {
+    'HEADER': 'banner', 'NAV': 'navigation', 'MAIN': 'main',
+    'FOOTER': 'contentinfo', 'ASIDE': 'complementary',
+    'SECTION': 'region', 'ARTICLE': 'article', 'FORM': 'form',
+    'A': 'link', 'BUTTON': 'button', 'INPUT': 'textbox',
+    'TEXTAREA': 'textbox', 'SELECT': 'combobox',
+    'H1': 'heading', 'H2': 'heading', 'H3': 'heading',
+    'H4': 'heading', 'H5': 'heading', 'H6': 'heading',
+    'UL': 'list', 'OL': 'list', 'LI': 'listitem',
+    'TABLE': 'table', 'TR': 'row', 'TH': 'columnheader', 'TD': 'cell',
+    'IMG': 'img', 'DIALOG': 'dialog', 'PROGRESS': 'progressbar'
+};
+
+const INPUT_TYPE_ROLES = {
+    'button': 'button', 'submit': 'button', 'reset': 'button',
+    'checkbox': 'checkbox', 'radio': 'radio', 'range': 'slider',
+    'number': 'spinbutton', 'search': 'searchbox',
+    'email': 'textbox', 'tel': 'textbox', 'url': 'textbox',
+    'password': 'textbox', 'text': 'textbox', 'hidden': 'none'
+};
+
+/**
+ * Get ARIA role for element
+ */
+function getAccessibleRole(element) {
+    const explicitRole = element.getAttribute('role');
+    if (explicitRole) return explicitRole;
+
+    const tagName = element.tagName.toUpperCase();
+    if (tagName === 'INPUT') {
+        const inputType = (element.type || 'text').toLowerCase();
+        return INPUT_TYPE_ROLES[inputType] || 'textbox';
+    }
+    return IMPLICIT_ROLES[tagName] || 'generic';
+}
+
+/**
+ * Get accessible name for element
+ */
+function getFullAccessibleName(element) {
+    // aria-labelledby
+    const labelledBy = element.getAttribute('aria-labelledby');
+    if (labelledBy) {
+        const names = labelledBy.split(/\s+/).map(id => {
+            const el = document.getElementById(id);
+            return el?.textContent?.trim() || '';
+        }).filter(Boolean);
+        if (names.length) return names.join(' ');
+    }
+
+    // aria-label
+    const ariaLabel = element.getAttribute('aria-label');
+    if (ariaLabel) return ariaLabel;
+
+    // Associated label
+    if (element.id) {
+        const label = document.querySelector(`label[for="${element.id}"]`);
+        if (label?.textContent) return label.textContent.trim();
+    }
+
+    // Parent label
+    const parentLabel = element.closest('label');
+    if (parentLabel) {
+        const clone = parentLabel.cloneNode(true);
+        clone.querySelectorAll('input, select, textarea').forEach(el => el.remove());
+        const text = clone.textContent?.trim();
+        if (text) return text;
+    }
+
+    // Placeholder
+    if (element.placeholder) return element.placeholder;
+
+    // Text content for buttons/links
+    const role = getAccessibleRole(element);
+    if (['button', 'link', 'menuitem', 'tab', 'option'].includes(role)) {
+        return element.textContent?.trim() || '';
+    }
+
+    // Alt for images
+    if (element.alt) return element.alt;
+
+    // Title
+    return element.getAttribute('title') || '';
+}
+
+/**
+ * Scan and build simplified AX tree for agent
+ */
+function scanAXTree() {
+    const INTERACTIVE_ROLES = new Set([
+        'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox',
+        'listbox', 'menu', 'menuitem', 'option', 'searchbox', 'slider',
+        'spinbutton', 'switch', 'tab', 'treeitem'
+    ]);
+
+    const nodes = [];
+    let indexCounter = 1;
+
+    function processElement(element) {
+        // Skip hidden elements
+        if (element.getAttribute('aria-hidden') === 'true') return;
+        const style = window.getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+
+        const role = getAccessibleRole(element);
+
+        // Only include interactive elements
+        if (INTERACTIVE_ROLES.has(role)) {
+            const rect = element.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                const name = getFullAccessibleName(element);
+
+                // Get value
+                let value = undefined;
+                if (element.type === 'checkbox' || element.type === 'radio') {
+                    value = element.checked ? 'true' : 'false';
+                } else if (element.value && element.type !== 'password') {
+                    value = element.value;
+                } else if (element.tagName === 'SELECT' && element.selectedIndex >= 0) {
+                    value = element.options[element.selectedIndex]?.text;
+                }
+
+                // Get properties
+                const props = {};
+                if (element.disabled) props.disabled = true;
+                if (element.required) props.required = true;
+                if (element.checked) props.checked = true;
+                if (element.getAttribute('aria-expanded')) {
+                    props.expanded = element.getAttribute('aria-expanded');
+                }
+                if (/^H[1-6]$/.test(element.tagName)) {
+                    props.level = parseInt(element.tagName[1]);
+                }
+
+                nodes.push({
+                    index: indexCounter++,
+                    role,
+                    name: name || '',
+                    value,
+                    properties: props,
+                    selector: generateSelector(element),
+                    rect: {
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    }
+                });
+            }
+        }
+
+        // Process children
+        Array.from(element.children).forEach(processElement);
+    }
+
+    processElement(document.body);
+    return nodes;
+}
+
+/**
+ * Format AX tree for LLM (browser-use style)
+ */
+function formatAXTreeForLLM(nodes) {
+    return nodes.map(node => {
+        let line = `[${node.index}] <${node.role}`;
+        if (node.name) line += ` name="${node.name}"`;
+        if (node.value) line += ` value="${node.value}"`;
+        Object.entries(node.properties || {}).forEach(([key, val]) => {
+            if (val === true) line += ` ${key}`;
+            else line += ` ${key}="${val}"`;
+        });
+        line += '>';
+        return line;
+    }).join('\n');
+}
+
+/**
+ * Get full agent-compatible state (includes AX tree)
+ */
+function getAgentState() {
+    const axTree = scanAXTree();
+    return {
+        url: window.location.href,
+        title: document.title,
+        elements: scanForAgent(),
+        axTree: axTree,
+        axTreeFormatted: formatAXTreeForLLM(axTree),
+        viewport: getViewportInfo(),
+        timestamp: Date.now()
+    };
+}
+
 // ============ Message Handler ============
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -584,6 +899,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'GET_AGENT_STATE':
             sendResponse({ success: true, state: currentAgentState });
+            break;
+
+        // ============ Browser-Use Agent Integration ============
+        case 'AGENT_SCAN':
+            // Return browser-use compatible DOM scan
+            const agentScanResult = getAgentState();
+            console.log('[Opero] Agent scan:', agentScanResult.elements.length, 'elements');
+            sendResponse({ success: true, ...agentScanResult });
+            break;
+
+        case 'EXECUTE_AGENT_ACTION':
+            // Execute a browser-use style action
+            executeAgentAction(message.action).then(result => {
+                sendResponse({ success: true, ...result });
+            }).catch(error => {
+                sendResponse({ success: false, error: error.message });
+            });
             break;
 
         default:
@@ -658,6 +990,204 @@ async function executeStep(step) {
         setAgentState('error');
         return { success: false, error: error.message };
     }
+}
+
+// ============ Browser-Use Style Action Executor ============
+
+/**
+ * Execute a browser-use style action from the agent module
+ * Actions come in format: { click: { index: 1 } } or { input: { index: 1, text: "..." } }
+ */
+async function executeAgentAction(action) {
+    console.log('[Opero] Executing agent action:', JSON.stringify(action).slice(0, 200));
+
+    // Get current elements for index lookup
+    const currentElements = scanForAgent();
+
+    // Get action type and data
+    const actionType = Object.keys(action)[0];
+    const actionData = action[actionType];
+
+    try {
+        switch (actionType) {
+            case 'click': {
+                const element = findElementByIndex(currentElements, actionData.index);
+                if (!element) {
+                    return { success: false, error: `Element ${actionData.index} not found` };
+                }
+                const domElement = document.querySelector(element.selector);
+                if (!domElement) {
+                    return { success: false, error: `DOM element not found: ${element.selector}` };
+                }
+
+                // Scroll into view and click
+                domElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                showElementSpotlight(domElement);
+                await delay(300);
+
+                domElement.click();
+                highlightElement(domElement);
+
+                return { success: true, causedPageChange: isLinkOrSubmit(domElement) };
+            }
+
+            case 'input': {
+                const element = findElementByIndex(currentElements, actionData.index);
+                if (!element) {
+                    return { success: false, error: `Element ${actionData.index} not found` };
+                }
+                const domElement = document.querySelector(element.selector);
+                if (!domElement) {
+                    return { success: false, error: `DOM element not found: ${element.selector}` };
+                }
+
+                // Scroll, focus, clear if needed, type
+                domElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                showElementSpotlight(domElement);
+                await delay(300);
+
+                domElement.focus();
+                await delay(100);
+
+                if (actionData.clear !== false) {
+                    domElement.value = '';
+                }
+
+                // Type text
+                const text = actionData.text || '';
+                for (let i = 0; i < text.length; i++) {
+                    domElement.value += text[i];
+                    domElement.dispatchEvent(new Event('input', { bubbles: true }));
+                    await delay(30 + Math.random() * 20);
+                }
+
+                domElement.dispatchEvent(new Event('change', { bubbles: true }));
+                highlightElement(domElement);
+
+                return { success: true };
+            }
+
+            case 'navigate': {
+                if (actionData.url) {
+                    window.location.href = actionData.url;
+                    return { success: true, causedPageChange: true };
+                }
+                return { success: false, error: 'No URL provided' };
+            }
+
+            case 'scroll': {
+                const direction = actionData.down !== false ? 1 : -1;
+                const pages = actionData.pages || 1;
+                const scrollAmount = window.innerHeight * pages * direction;
+
+                window.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+                await delay(500);
+
+                return { success: true };
+            }
+
+            case 'sendKeys': {
+                const keys = actionData.keys || '';
+                // Handle common keys
+                if (keys === 'Enter') {
+                    const active = document.activeElement;
+                    if (active) {
+                        active.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+                        active.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+                    }
+                } else if (keys === 'Escape') {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                } else if (keys === 'Tab') {
+                    // Focus next element
+                    const focusable = document.querySelectorAll('input, textarea, select, button, a[href]');
+                    const current = document.activeElement;
+                    const arr = Array.from(focusable);
+                    const idx = arr.indexOf(current);
+                    if (idx >= 0 && idx < arr.length - 1) {
+                        arr[idx + 1].focus();
+                    }
+                }
+                return { success: true };
+            }
+
+            case 'selectDropdown': {
+                const element = findElementByIndex(currentElements, actionData.index);
+                if (!element) {
+                    return { success: false, error: `Element ${actionData.index} not found` };
+                }
+                const domElement = document.querySelector(element.selector);
+                if (!domElement || domElement.tagName !== 'SELECT') {
+                    return { success: false, error: 'Not a select element' };
+                }
+
+                // Find and select the option
+                const options = Array.from(domElement.options);
+                const option = options.find(o =>
+                    o.text.toLowerCase().includes(actionData.text.toLowerCase()) ||
+                    o.value.toLowerCase().includes(actionData.text.toLowerCase())
+                );
+
+                if (option) {
+                    domElement.value = option.value;
+                    domElement.dispatchEvent(new Event('change', { bubbles: true }));
+                    highlightElement(domElement);
+                    return { success: true };
+                }
+
+                return { success: false, error: `Option "${actionData.text}" not found` };
+            }
+
+            case 'goBack': {
+                window.history.back();
+                return { success: true, causedPageChange: true };
+            }
+
+            case 'wait': {
+                const seconds = actionData.seconds || 3;
+                await delay(seconds * 1000);
+                return { success: true };
+            }
+
+            case 'screenshot': {
+                // Can't capture from content script, signal to extension
+                return { success: true, needsScreenshot: true };
+            }
+
+            case 'done': {
+                setAgentState('complete');
+                return {
+                    success: true,
+                    isDone: true,
+                    message: actionData.text,
+                    taskSuccess: actionData.success !== false
+                };
+            }
+
+            default:
+                return { success: false, error: `Unknown action type: ${actionType}` };
+        }
+    } catch (error) {
+        console.error('[Opero] Agent action error:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Find element by agent index
+ */
+function findElementByIndex(elements, index) {
+    // Elements are indexed starting from 1 in browser-use format
+    return elements.find((el, i) => i + 1 === index);
+}
+
+/**
+ * Check if element might cause page navigation
+ */
+function isLinkOrSubmit(element) {
+    if (element.tagName === 'A' && element.href) return true;
+    if (element.type === 'submit') return true;
+    if (element.tagName === 'BUTTON' && element.closest('form')) return true;
+    return false;
 }
 
 async function executeNavigate(step) {

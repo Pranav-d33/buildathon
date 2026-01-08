@@ -1,10 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { parseIntent, generateRTIDraft, generatePlan, getAgentResponse, MODELS } from '@/lib/llm'
+import { parseIntent, generateRTIDraft, generatePlan, getAgentResponse, MODELS, callLLM } from '@/lib/llm'
 import { orchestrate, orchestrateWithContext, createTaskFromIntent, markVisionUsed } from '@/lib/orchestrator'
 import { getPlanForTask } from '@/lib/planner'
 import { summarizeContext, contextToPrompt, calculateConfidence } from '@/lib/contextSummarizer'
 import { analyzeScreenshot, checkForCaptcha, augmentContextWithVision, solveCaptcha, analyzeUnfillableField } from '@/lib/vision'
 import type { BrowserContext, UserState, FullContext } from '@/types/context'
+import {
+    storeMemory,
+    queryMemory,
+    formatMemoriesForPrompt,
+    isPineconeConfigured,
+    getIndexStats,
+    type MemoryEntry,
+    type MemoryMetadata,
+    type QueryOptions,
+} from '@/lib/pinecone'
+import {
+    Agent,
+    createBrowserState,
+    createActionExecutor,
+    type RawElementData,
+    type ViewportInfo,
+    type TabInfo,
+    type AgentAction,
+    type BrowserState,
+} from '@/lib/agent'
 
 // CORS headers for extension requests
 const corsHeaders = {
@@ -211,6 +231,227 @@ export async function POST(request: NextRequest) {
                     success: true,
                     nextAction
                 }, { headers: corsHeaders })
+            }
+
+            // ============ Browser-Use Style Agent Step ============
+            case 'agent_step': {
+                const {
+                    task,
+                    elements,
+                    viewport,
+                    url,
+                    title,
+                    tabs,
+                    screenshot,
+                    previousState,
+                    history
+                } = data as {
+                    task: string
+                    elements: RawElementData[]
+                    viewport: ViewportInfo
+                    url: string
+                    title: string
+                    tabs?: TabInfo[]
+                    screenshot?: string
+                    previousState?: BrowserState
+                    history?: Array<{
+                        stepNumber: number
+                        evaluation: string
+                        memory: string
+                        nextGoal: string
+                        actionResults: Array<{ action: string; success: boolean; error?: string }>
+                    }>
+                }
+
+                console.log('[API] Agent step for task:', task.slice(0, 100))
+                console.log('[API] Received', elements.length, 'elements')
+
+                // 1. Create browser state from extension data
+                const browserState = createBrowserState({
+                    url,
+                    title,
+                    viewport,
+                    elements,
+                    tabs,
+                    screenshot,
+                    previousState,
+                })
+
+                // 2. Create agent with callbacks
+                const agent = new Agent({
+                    task,
+                    settings: {
+                        maxSteps: 1,  // Single step execution
+                        maxActionsPerStep: 3,
+                        useVision: !!screenshot,
+                    },
+                    getBrowserState: async () => browserState,
+                    executeAction: async (action: AgentAction) => {
+                        // Return action for extension to execute
+                        // The actual execution happens in the extension
+                        return {
+                            isDone: 'done' in action,
+                            success: 'done' in action ? (action as any).done.success : null,
+                            error: null,
+                            judgement: null,
+                            attachments: null,
+                            images: null,
+                            longTermMemory: null,
+                            extractedContent: 'done' in action ? (action as any).done.text : null,
+                            includeExtractedContentOnlyOnce: false,
+                            metadata: { action, pendingExecution: true },
+                        }
+                    },
+                    callLLM: async (messages: any[]) => {
+                        return await callLLM(messages, MODELS.CONVERSATION)
+                    },
+                })
+
+                // 3. Execute single step
+                const result = await agent.run()
+
+                // 4. Extract actions for extension to execute
+                const lastHistory = result.history[result.history.length - 1]
+                const actions = lastHistory?.modelOutput?.action || []
+                const agentThinking = {
+                    thinking: lastHistory?.modelOutput?.thinking,
+                    evaluation: lastHistory?.modelOutput?.evaluationPreviousGoal,
+                    memory: lastHistory?.modelOutput?.memory,
+                    nextGoal: lastHistory?.modelOutput?.nextGoal,
+                }
+
+                return NextResponse.json({
+                    success: true,
+                    actions,
+                    agentThinking,
+                    browserState: {
+                        elementsCount: browserState.interactiveElements.length,
+                        url: browserState.url,
+                        title: browserState.title,
+                    },
+                    isDone: result.success && actions.some((a: AgentAction) => 'done' in a),
+                    finalMessage: result.finalMessage,
+                }, { headers: corsHeaders })
+            }
+
+            // ============ Vector Memory - Store ============
+            case 'store_memory': {
+                const { entry, metadata } = data as {
+                    entry: MemoryEntry
+                    metadata: MemoryMetadata
+                }
+
+                if (!isPineconeConfigured()) {
+                    return NextResponse.json({
+                        success: false,
+                        error: 'Pinecone is not configured. Add PINECONE_API_KEY to .env'
+                    }, { status: 400, headers: corsHeaders })
+                }
+
+                console.log('[API] Storing memory for step:', metadata.stepNumber)
+                const id = await storeMemory(entry, metadata)
+
+                return NextResponse.json({
+                    success: true,
+                    id,
+                    message: 'Memory stored successfully'
+                }, { headers: corsHeaders })
+            }
+
+            // ============ Vector Memory - Query ============
+            case 'query_memory': {
+                const { instruction, options } = data as {
+                    instruction: string
+                    options?: QueryOptions
+                }
+
+                if (!isPineconeConfigured()) {
+                    return NextResponse.json({
+                        success: true,
+                        memories: [],
+                        formatted: '',
+                        message: 'Pinecone not configured - skipping memory lookup'
+                    }, { headers: corsHeaders })
+                }
+
+                console.log('[API] Querying memory for:', instruction.slice(0, 100))
+                const memories = await queryMemory(instruction, options)
+                const formatted = formatMemoriesForPrompt(memories)
+
+                return NextResponse.json({
+                    success: true,
+                    memories,
+                    formatted,
+                    count: memories.length
+                }, { headers: corsHeaders })
+            }
+
+            // ============ Vector Memory - Status ============
+            case 'memory_status': {
+                const configured = isPineconeConfigured()
+                let stats = null
+
+                if (configured) {
+                    try {
+                        stats = await getIndexStats()
+                    } catch (error) {
+                        console.warn('[API] Failed to get Pinecone stats:', error)
+                    }
+                }
+
+                return NextResponse.json({
+                    success: true,
+                    configured,
+                    stats
+                }, { headers: corsHeaders })
+            }
+
+            // ============ TTS - Text to Speech ============
+            case 'speak': {
+                const { text, voice_id, rate } = data as {
+                    text: string
+                    voice_id?: string
+                    rate?: number
+                }
+
+                if (!text || text.trim().length === 0) {
+                    return NextResponse.json({
+                        success: false,
+                        error: 'Text is required'
+                    }, { status: 400, headers: corsHeaders })
+                }
+
+                // Forward to Python TTS server
+                const TTS_SERVER = process.env.TTS_SERVER_URL || 'http://localhost:8765'
+
+                try {
+                    const ttsResponse = await fetch(`${TTS_SERVER}/speak/base64`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ text, voice_id, rate })
+                    })
+
+                    if (ttsResponse.ok) {
+                        const ttsResult = await ttsResponse.json()
+                        return NextResponse.json({
+                            success: true,
+                            audio: ttsResult.audio,
+                            text_length: text.length
+                        }, { headers: corsHeaders })
+                    } else {
+                        console.warn('[API] TTS server error:', await ttsResponse.text())
+                        return NextResponse.json({
+                            success: false,
+                            error: 'TTS server unavailable'
+                        }, { status: 503, headers: corsHeaders })
+                    }
+                } catch (error) {
+                    console.warn('[API] TTS server not reachable:', error)
+                    return NextResponse.json({
+                        success: false,
+                        error: 'TTS server not running. Start with: cd tts_server && python app.py'
+                    }, { status: 503, headers: corsHeaders })
+                }
             }
 
             // ============ Model Info ============
