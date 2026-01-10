@@ -222,3 +222,110 @@ export {
     formatAXTreeForLLM,
 } from './axTree';
 
+// ============ Autonomous Execution Loop ============
+export {
+    // Types
+    type PageState,
+    type LoopHistoryEntry,
+    type AgentLoopInput,
+    type AgentLoopAction,
+    type HITLRequest,
+    type AgentLoopOutput,
+    type LoopState,
+    type AutonomousLoopConfig,
+
+    // Constants
+    WAITING_FOR_GOAL,
+
+    // Functions
+    buildLoopPrompt,
+    buildObservationSummary,
+    buildHistorySummary,
+    buildMemoryContext,
+    parseThoughtAction,
+    shouldRequireHITL,
+    translateToAgentAction,
+    detectPageState,
+    runAutonomousLoop,
+} from './autonomousLoop';
+
+// ============ Verification + Reflection ============
+export {
+    // Types
+    type VerificationResult,
+    type CorrectiveAction,
+    type ReflectionResult,
+
+    // Functions
+    verifyAction,
+    generateReflection,
+    correctiveToAgentAction,
+    shouldVerify,
+    shouldReflect,
+} from './verifyReflect';
+
+// ============ Affordances (Phase 1) ============
+export {
+    // Types
+    type PageState as AffordancePageState,
+    type LinkAffordance,
+    type ButtonAffordance,
+    type InputAffordance,
+    type SelectAffordance,
+    type ModalAffordance,
+    type ErrorMessage,
+    type FormAffordance,
+    type CaptchaAffordance,
+    type AffordanceMap,
+    type PageObservation,
+
+    // Constants
+    ERROR_KEYWORDS,
+    SUCCESS_KEYWORDS,
+    CAPTCHA_SELECTORS,
+    MODAL_SELECTORS,
+
+    // Functions
+    containsErrorKeyword,
+    containsSuccessKeyword,
+    inferPageState,
+    getActionableCount,
+    findByText,
+    visibleOnly,
+} from './affordances';
+
+// ============ Completion Detection (Phase 8) ============
+export {
+    // Types
+    type CompletionCriteriaType,
+    type CompletionCriterion,
+    type CompletionResult,
+
+    // Constants
+    SUCCESS_PATTERNS,
+
+    // Functions
+    detectCompletion,
+    autoDetectCompletion,
+    urlContains,
+    pageContainsText,
+    elementExists,
+    formWasSubmitted,
+    createRTICompletionCriteria,
+} from './completionDetector';
+
+// ============ Metrics (Phase 10) ============
+export {
+    // Types
+    type TaskMetrics,
+    type StepMetric,
+    type HITLEvent,
+    type AggregateMetrics,
+
+    // Class
+    MetricsCollector,
+
+    // Functions
+    getMetricsCollector,
+    resetMetrics,
+} from './metrics';

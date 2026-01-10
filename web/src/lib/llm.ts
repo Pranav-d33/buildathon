@@ -1,13 +1,116 @@
 // OpenRouter LLM Client - Agentic Mode
 // AI decides what actions to take based on context and user intent
+// Phase 11: Model configuration with benchmarking support
 
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions'
-// Model constants - Using free models from OpenRouter
+
+// ============ Model Configuration Matrix ============
+// Primary models (free tier defaults)
+// Check https://openrouter.ai/models for current free models
+
 export const MODELS = {
-    CONVERSATION: 'deepseek/deepseek-chat:free',
-    PLANNER: 'mistralai/mistral-small-3.1-24b-instruct:free',
-    VISION: 'google/gemini-2.0-flash-exp:free'
+    // Current defaults (free tier)
+    CONVERSATION: 'mistralai/mistral-7b-instruct:free',
+    PLANNER: 'mistralai/mistral-7b-instruct:free',
+    VISION: 'google/gemini-2.0-flash-exp:free',
+
+    // Alternative models for benchmarking (Phase 11)
+    ALTERNATIVES: {
+        // Free tier alternatives
+        GEMINI_FLASH: 'google/gemini-2.0-flash-exp:free',
+        MISTRAL_7B: 'mistralai/mistral-7b-instruct:free',
+        LLAMA_3_8B: 'meta-llama/llama-3-8b-instruct:free',
+        QWEN_7B: 'qwen/qwen-2-7b-instruct:free',
+
+        // Paid tier (higher capability)
+        GPT4_TURBO: 'openai/gpt-4-turbo-preview',
+        GPT4O: 'openai/gpt-4o',
+        CLAUDE_SONNET: 'anthropic/claude-3.5-sonnet',
+        CLAUDE_HAIKU: 'anthropic/claude-3-haiku',
+        LLAMA3_70B: 'meta-llama/llama-3-70b-instruct',
+        MIXTRAL_8X7B: 'mistralai/mixtral-8x7b-instruct',
+        QWEN2_72B: 'qwen/qwen-2-72b-instruct',
+        GEMINI_PRO: 'google/gemini-pro-1.5',
+    },
+
+    // Vision-capable models
+    VISION_ALTERNATIVES: {
+        GEMINI_FLASH: 'google/gemini-2.0-flash-exp:free',
+        GPT4O: 'openai/gpt-4o',
+        CLAUDE_SONNET: 'anthropic/claude-3.5-sonnet',
+        GEMINI_PRO: 'google/gemini-pro-1.5',
+    }
 } as const
+
+// ============ Active Model State (for benchmarking) ============
+let _activeConversationModel: string = MODELS.CONVERSATION
+let _activePlannerModel: string = MODELS.PLANNER
+let _activeVisionModel: string = MODELS.VISION
+
+export type ModelAlternativeKey = keyof typeof MODELS.ALTERNATIVES
+export type VisionModelKey = keyof typeof MODELS.VISION_ALTERNATIVES
+
+/**
+ * Set the active conversation/planner model for benchmarking
+ */
+export function setActiveModel(modelKey: ModelAlternativeKey): void {
+    const model = MODELS.ALTERNATIVES[modelKey]
+    if (model) {
+        _activeConversationModel = model
+        _activePlannerModel = model
+        console.log(`[LLM] Active model set to: ${model}`)
+    }
+}
+
+/**
+ * Set the active vision model for benchmarking
+ */
+export function setActiveVisionModel(modelKey: VisionModelKey): void {
+    const model = MODELS.VISION_ALTERNATIVES[modelKey]
+    if (model) {
+        _activeVisionModel = model
+        console.log(`[LLM] Active vision model set to: ${model}`)
+    }
+}
+
+/**
+ * Get the currently active conversation model
+ */
+export function getActiveModel(): string {
+    return _activeConversationModel
+}
+
+/**
+ * Get the currently active vision model
+ */
+export function getActiveVisionModel(): string {
+    return _activeVisionModel
+}
+
+/**
+ * Reset models to defaults
+ */
+export function resetModels(): void {
+    _activeConversationModel = MODELS.CONVERSATION
+    _activePlannerModel = MODELS.PLANNER
+    _activeVisionModel = MODELS.VISION
+    console.log('[LLM] Models reset to defaults')
+}
+
+/**
+ * Get model info for metrics/logging
+ */
+export function getModelInfo(): {
+    conversation: string
+    planner: string
+    vision: string
+} {
+    return {
+        conversation: _activeConversationModel,
+        planner: _activePlannerModel,
+        vision: _activeVisionModel,
+    }
+}
 
 type Message = {
     role: 'system' | 'user' | 'assistant'
@@ -26,10 +129,20 @@ export async function callLLM(
     messages: Message[],
     model: string = MODELS.CONVERSATION
 ): Promise<string> {
+    const apiKey = process.env.OPENROUTER_API_KEY
+
+    // Debug: Check if API key is loaded
+    if (!apiKey) {
+        console.error('[LLM] ERROR: OPENROUTER_API_KEY is not set in environment!')
+        throw new Error('OPENROUTER_API_KEY is not configured. Please add it to .env file.')
+    }
+
+    console.log(`[LLM] Calling model: ${model}`)
+
     const response = await fetch(OPENROUTER_API_URL, {
         method: 'POST',
         headers: {
-            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
             'HTTP-Referer': 'https://opero.app',
             'X-Title': 'Opero',
@@ -41,7 +154,10 @@ export async function callLLM(
     })
 
     if (!response.ok) {
-        throw new Error(`LLM request failed: ${response.statusText}`)
+        const errorText = await response.text()
+        console.error(`[LLM] API Error: ${response.status} ${response.statusText}`)
+        console.error(`[LLM] Response: ${errorText}`)
+        throw new Error(`LLM request failed: ${response.status} ${response.statusText} - ${errorText}`)
     }
 
     const data: LLMResponse = await response.json()
@@ -88,60 +204,105 @@ KNOWN WEBSITES:
 - Passport: https://passportindia.gov.in/
 - Income Tax: https://incometax.gov.in/
 
-RULES:
-1. If user asks to go somewhere or open a website → use "navigate" action
+PAGE AWARENESS RULES (CRITICAL):
+1. ALWAYS check the current URL/domain BEFORE using "navigate"
+2. If user is ALREADY on the target website → DO NOT navigate again, use "respond" instead
+3. If user asks about content on the current page → extract info from page context, no navigation
+4. Example: If current domain is "scholarships.gov.in" and user asks "what scholarships are available?" → DO NOT navigate, just explore current page
+
+GENERAL RULES:
+1. If user asks to go somewhere or open a website → check domain first, then navigate if needed
 2. If user asks "what page am I on" → describe the current page context (no action needed)
 3. If on a form and user wants to fill it → use "fill_form" action
 4. If you need more info → use "ask_user" action with specific questions
 5. Never make up information about the user
 6. For multi-step tasks (like filing RTI), use "plan" action
+7. Remember previous conversation context and actions taken
 
 Always respond with valid JSON:
 {
     "message": "What you say to the user",
     "action": { action object or null },
     "context_understood": true/false,
-    "page_relevant": true/false
+    "page_relevant": true/false,
+    "thought": "Brief reasoning about your decision"
 }`
+
+export interface AgentHistoryEntry {
+    stepNumber: number;
+    action: AgentAction;
+    thought?: string;
+    url?: string;
+    timestamp?: number;
+}
 
 export function buildAgentPrompt(
     userMessage: string,
     pageContext?: string,
-    conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
+    conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>,
+    agentHistory?: AgentHistoryEntry[],
+    currentUrl?: string,
+    currentDomain?: string
 ): Message[] {
     const messages: Message[] = [
         { role: 'system', content: AGENT_SYSTEM_PROMPT }
     ]
 
-    // Add conversation history if provided
+    // Add conversation history if provided (as alternating messages)
     if (conversationHistory && conversationHistory.length > 0) {
-        const recentHistory = conversationHistory.slice(-6) // Last 3 exchanges
+        const recentHistory = conversationHistory.slice(-10) // Last 5 exchanges
         for (const msg of recentHistory) {
             messages.push({ role: msg.role, content: msg.content })
         }
     }
 
-    // Build the current message with context
-    let currentMessage = `User says: "${userMessage}"`
-
-    if (pageContext) {
-        currentMessage = `CURRENT PAGE CONTEXT:
-${pageContext}
-
-USER MESSAGE: "${userMessage}"`
+    // Build agent step history summary for working memory
+    let agentHistorySummary = '';
+    if (agentHistory && agentHistory.length > 0) {
+        const recentSteps = agentHistory.slice(-5);
+        const stepLines = recentSteps.map(step => {
+            const actionType = step.action?.type || 'unknown';
+            return `Step ${step.stepNumber}: ${actionType}${step.url ? ` @ ${step.url}` : ''}`;
+        });
+        agentHistorySummary = `\n\nAGENT HISTORY (recent actions taken):\n${stepLines.join('\n')}`;
     }
 
-    messages.push({ role: 'user', content: currentMessage })
+    // Build the current message with context
+    let currentMessage = `User says: "${userMessage}"`;
 
-    return messages
+    if (pageContext || currentUrl) {
+        currentMessage = `CURRENT PAGE STATE:
+URL: ${currentUrl || 'unknown'}
+Domain: ${currentDomain || 'unknown'}
+${pageContext ? `\nPage Details:\n${pageContext}` : ''}
+${agentHistorySummary}
+
+USER MESSAGE: "${userMessage}"
+
+REMEMBER: Check the current domain before deciding to navigate. If already on the target site, explore the page instead.`;
+    }
+
+    messages.push({ role: 'user', content: currentMessage });
+
+    return messages;
 }
 
 export async function getAgentResponse(
     userMessage: string,
     pageContext?: string,
-    conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>
+    conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>,
+    agentHistory?: AgentHistoryEntry[],
+    currentUrl?: string,
+    currentDomain?: string
 ): Promise<AgentResponse> {
-    const messages = buildAgentPrompt(userMessage, pageContext, conversationHistory)
+    const messages = buildAgentPrompt(
+        userMessage,
+        pageContext,
+        conversationHistory,
+        agentHistory,
+        currentUrl,
+        currentDomain
+    )
 
     const response = await callLLM(messages, MODELS.CONVERSATION)
 

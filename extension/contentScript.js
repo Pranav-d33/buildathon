@@ -34,7 +34,8 @@ const SUPPORTED_SITES = [
     'rtionline.gov.in',
     'rti.gov.in',
     'rtimis.gov.in',
-    'cic.gov.in'
+    'cic.gov.in',
+    'scholarships.gov.in'
 ];
 
 // Check if current site is supported
@@ -843,17 +844,377 @@ function formatAXTreeForLLM(nodes) {
     }).join('\n');
 }
 
+// ============ Enhanced Affordance Scanning ============
+
+// Error keywords for detection
+const ERROR_KEYWORDS = [
+    'error', 'invalid', 'required', 'failed', 'incorrect',
+    'wrong', 'missing', 'cannot', 'unable', 'must', 'please enter',
+    'already exists', 'not found', 'expired', 'denied'
+];
+
+// Success keywords for detection
+const SUCCESS_KEYWORDS = [
+    'success', 'thank you', 'submitted', 'confirmed', 'completed',
+    'received', 'saved', 'registered', 'created', 'sent',
+    'approved', 'accepted', 'done', 'congratulations'
+];
+
 /**
- * Get full agent-compatible state (includes AX tree)
+ * Scan for modals/dialogs on the page
+ */
+function scanModals() {
+    const MODAL_SELECTORS = [
+        '[role="dialog"]',
+        '[role="alertdialog"]',
+        '[aria-modal="true"]',
+        '.modal', '.dialog', '.popup', '.overlay',
+        '[class*="modal"]', '[class*="dialog"]', '[class*="popup"]'
+    ];
+
+    const modals = [];
+    let indexCounter = 1;
+
+    MODAL_SELECTORS.forEach(selector => {
+        try {
+            document.querySelectorAll(selector).forEach(el => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+
+                // Check visibility
+                const isVisible = style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    parseFloat(style.opacity) > 0.1 &&
+                    rect.width > 50 && rect.height > 50;
+
+                if (!isVisible) return;
+
+                // Find close button
+                const closeBtn = el.querySelector('[aria-label*="close"], [class*="close"], button:has(.close), .close-btn, [data-dismiss]');
+
+                // Find action buttons
+                const buttons = Array.from(el.querySelectorAll('button, [role="button"], input[type="submit"]')).map(btn => {
+                    const text = btn.textContent?.trim() || btn.value || btn.getAttribute('aria-label') || '';
+                    let role = 'other';
+                    const lowerText = text.toLowerCase();
+                    if (lowerText.includes('ok') || lowerText.includes('confirm') || lowerText.includes('yes') || lowerText.includes('submit')) role = 'confirm';
+                    else if (lowerText.includes('cancel') || lowerText.includes('no')) role = 'cancel';
+                    else if (lowerText.includes('close')) role = 'close';
+
+                    return { text, selector: generateSelector(btn), role };
+                });
+
+                // Get title
+                const titleEl = el.querySelector('[class*="title"], [class*="header"], h1, h2, h3, .modal-title');
+                const title = titleEl?.textContent?.trim();
+
+                // Determine type
+                let type = 'dialog';
+                if (el.getAttribute('role') === 'alertdialog') type = 'alert';
+                else if (el.classList.contains('popup') || el.className.includes('popup')) type = 'popup';
+                else if (el.classList.contains('overlay') || el.className.includes('overlay')) type = 'overlay';
+
+                modals.push({
+                    index: indexCounter++,
+                    type,
+                    title,
+                    content: el.textContent?.slice(0, 300)?.trim() || '',
+                    selector: generateSelector(el),
+                    isVisible: true,
+                    hasCloseButton: !!closeBtn,
+                    closeButtonSelector: closeBtn ? generateSelector(closeBtn) : undefined,
+                    buttons,
+                    position: {
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    }
+                });
+            });
+        } catch (e) {
+            // Ignore selector errors
+        }
+    });
+
+    return modals;
+}
+
+/**
+ * Scan for error and validation messages
+ */
+function scanErrorMessages() {
+    const errors = [];
+    let indexCounter = 1;
+
+    // Common error element selectors
+    const ERROR_SELECTORS = [
+        '[class*="error"]', '[class*="invalid"]',
+        '[class*="alert-danger"]', '[class*="alert-error"]',
+        '.validation-message', '.help-block.error',
+        '[role="alert"]', '[aria-invalid="true"]',
+        '.error-message', '.field-error', '.form-error'
+    ];
+
+    ERROR_SELECTORS.forEach(selector => {
+        try {
+            document.querySelectorAll(selector).forEach(el => {
+                const text = el.textContent?.trim() || '';
+                if (!text || text.length < 3) return;
+
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                const isVisible = style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    rect.height > 0;
+
+                if (!isVisible) return;
+
+                // Determine type and severity
+                let type = 'validation';
+                let severity = 'error';
+
+                const className = el.className.toLowerCase();
+                if (className.includes('warning')) severity = 'warning';
+                else if (className.includes('info')) severity = 'info';
+
+                if (className.includes('alert') || el.getAttribute('role') === 'alert') type = 'alert';
+                else if (className.includes('page') || className.includes('general')) type = 'page_error';
+
+                // Find associated field
+                let associatedField = undefined;
+                const forAttr = el.getAttribute('for');
+                if (forAttr) {
+                    const field = document.getElementById(forAttr);
+                    if (field) associatedField = findLabel(field) || forAttr;
+                } else {
+                    // Check if near an input
+                    const nearbyInput = el.previousElementSibling?.tagName === 'INPUT' ? el.previousElementSibling :
+                        el.parentElement?.querySelector('input, select, textarea');
+                    if (nearbyInput) associatedField = findLabel(nearbyInput);
+                }
+
+                errors.push({
+                    index: indexCounter++,
+                    type,
+                    message: text.slice(0, 200),
+                    selector: generateSelector(el),
+                    associatedField,
+                    severity,
+                    isVisible: true,
+                    position: { x: Math.round(rect.x), y: Math.round(rect.y) }
+                });
+            });
+        } catch (e) {
+            // Ignore selector errors
+        }
+    });
+
+    // Also check for text content matching error keywords anywhere
+    const allElements = document.querySelectorAll('span, p, div, label');
+    allElements.forEach(el => {
+        const text = el.textContent?.trim() || '';
+        if (text.length < 5 || text.length > 200) return;
+
+        const hasErrorKeyword = ERROR_KEYWORDS.some(kw => text.toLowerCase().includes(kw));
+        if (!hasErrorKeyword) return;
+
+        // Check if already captured
+        const selector = generateSelector(el);
+        if (errors.find(e => e.selector === selector)) return;
+
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const isVisible = style.display !== 'none' && rect.height > 0;
+
+        if (!isVisible) return;
+
+        errors.push({
+            index: indexCounter++,
+            type: 'validation',
+            message: text,
+            selector,
+            severity: 'error',
+            isVisible: true,
+            position: { x: Math.round(rect.x), y: Math.round(rect.y) }
+        });
+    });
+
+    return errors;
+}
+
+/**
+ * Scan form structures with field relationships
+ */
+function scanForms() {
+    const forms = [];
+    const allInputs = scanInputs();
+    const allButtons = scanButtons();
+
+    document.querySelectorAll('form').forEach((form, idx) => {
+        const formSelector = generateSelector(form);
+
+        // Find inputs belonging to this form
+        const formInputIndexes = [];
+        const formSelectIndexes = [];
+        const formButtonIndexes = [];
+        let submitButtonIndex = undefined;
+
+        allInputs.forEach((input, i) => {
+            try {
+                const el = document.querySelector(input.selector);
+                if (el && form.contains(el)) {
+                    if (input.tag === 'select') {
+                        formSelectIndexes.push(i);
+                    } else {
+                        formInputIndexes.push(i);
+                    }
+                }
+            } catch (e) { }
+        });
+
+        allButtons.forEach((btn, i) => {
+            try {
+                const el = document.querySelector(btn.selector);
+                if (el && form.contains(el)) {
+                    formButtonIndexes.push(i);
+                    if (btn.type === 'submit' && submitButtonIndex === undefined) {
+                        submitButtonIndex = i;
+                    }
+                }
+            } catch (e) { }
+        });
+
+        // Check if form has file upload
+        const hasFileUpload = !!form.querySelector('input[type="file"]');
+
+        // Calculate fill percentage
+        const requiredFields = allInputs.filter((inp, i) =>
+            formInputIndexes.includes(i) && inp.required
+        );
+        const filledRequired = requiredFields.filter(inp => inp.value && inp.value.trim() !== '');
+        const isFilled = requiredFields.length > 0 ?
+            Math.round((filledRequired.length / requiredFields.length) * 100) : 100;
+
+        // Get validation errors for this form
+        const formErrors = scanErrorMessages().filter(err => {
+            try {
+                const el = document.querySelector(err.selector);
+                return el && form.contains(el);
+            } catch (e) { return false; }
+        });
+
+        forms.push({
+            index: idx + 1,
+            id: form.id || undefined,
+            name: form.name || undefined,
+            action: form.action || undefined,
+            method: (form.method || 'GET').toUpperCase(),
+            selector: formSelector,
+            inputs: formInputIndexes,
+            selects: formSelectIndexes,
+            buttons: formButtonIndexes,
+            submitButton: submitButtonIndex,
+            hasFileUpload,
+            isFilled,
+            validationErrors: formErrors.map(e => e.message)
+        });
+    });
+
+    return forms;
+}
+
+/**
+ * Scan for CAPTCHA elements
+ */
+function scanCaptcha() {
+    const CAPTCHA_SELECTORS = [
+        '[class*="captcha"]', '[id*="captcha"]',
+        '[class*="recaptcha"]', '#g-recaptcha', '.h-captcha',
+        '[data-sitekey]', '[data-callback]',
+        'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]'
+    ];
+
+    for (const selector of CAPTCHA_SELECTORS) {
+        try {
+            const el = document.querySelector(selector);
+            if (!el) continue;
+
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            const isVisible = style.display !== 'none' && rect.width > 0 && rect.height > 0;
+
+            if (!isVisible) continue;
+
+            // Determine type
+            let type = 'unknown';
+            const html = el.outerHTML.toLowerCase();
+            if (html.includes('recaptcha') || html.includes('g-recaptcha')) type = 'recaptcha';
+            else if (html.includes('hcaptcha') || html.includes('h-captcha')) type = 'hcaptcha';
+            else if (el.querySelector('input[type="text"]')) type = 'text';
+            else if (el.querySelector('img')) type = 'image';
+
+            return {
+                type,
+                selector: generateSelector(el),
+                isVisible: true,
+                isSolved: false,
+                position: {
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height)
+                }
+            };
+        } catch (e) { }
+    }
+
+    return null;
+}
+
+/**
+ * Get complete affordances map
+ */
+function scanAffordances() {
+    return {
+        links: scanLinks(),
+        buttons: scanButtons(),
+        inputs: scanInputs(),
+        selects: scanInputs().filter(i => i.tag === 'select'),
+        modals: scanModals(),
+        errors: scanErrorMessages(),
+        forms: scanForms(),
+        captcha: scanCaptcha()
+    };
+}
+
+/**
+ * Infer page state from affordances
+ */
+function inferPageState(affordances) {
+    if (affordances.captcha?.isVisible) return 'captcha';
+    if (affordances.modals.length > 0) return 'modal_open';
+    if (affordances.errors.some(e => e.type === 'page_error')) return 'error';
+    if (affordances.forms.some(f => f.isFilled > 0 && f.isFilled < 100)) return 'form_filling';
+    return 'idle';
+}
+
+/**
+ * Get full agent-compatible state (includes AX tree and affordances)
  */
 function getAgentState() {
     const axTree = scanAXTree();
+    const affordances = scanAffordances();
+    const pageState = inferPageState(affordances);
+
     return {
         url: window.location.href,
         title: document.title,
+        pageState,
         elements: scanForAgent(),
         axTree: axTree,
         axTreeFormatted: formatAXTreeForLLM(axTree),
+        affordances,
         viewport: getViewportInfo(),
         timestamp: Date.now()
     };

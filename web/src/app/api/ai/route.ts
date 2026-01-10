@@ -160,13 +160,16 @@ export async function POST(request: NextRequest) {
 
             // ============ Agentic Chat (AI decides actions) ============
             case 'agent_chat': {
-                const { message, pageContext, conversationHistory } = data
+                const { message, pageContext, conversationHistory, agentHistory, currentUrl, currentDomain } = data
 
                 const contextPrompt = pageContext ? contextToPrompt(pageContext) : undefined
                 const agentResponse = await getAgentResponse(
                     message,
                     contextPrompt,
-                    conversationHistory || []
+                    conversationHistory || [],
+                    agentHistory || [],
+                    currentUrl,
+                    currentDomain
                 )
 
                 console.log('[API] Agent response:', JSON.stringify(agentResponse).slice(0, 200))

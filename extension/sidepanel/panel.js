@@ -1,5 +1,5 @@
 // Side Panel JavaScript
-// With Context Awareness Integration
+// With Context Awareness Integration and Memory
 
 // State
 let currentTask = null;
@@ -7,6 +7,12 @@ let isExecuting = false;
 let isPaused = false;
 let currentTabId = null;
 let currentContext = null; // Stores browser context
+
+// Memory State - Dialogue History & Agent History
+let chatHistory = [];      // Array of {role: 'user'|'assistant', content: string}
+let agentHistory = [];     // Array of step records for working memory
+let currentGoal = null;    // Active goal for continuous execution
+let loopRunning = false;   // Whether autonomous loop is active
 
 // DOM Elements
 const chatEl = document.getElementById('chat');
@@ -184,23 +190,37 @@ function updateStatus(connected) {
 
 // ============ Chat UI ============
 
-// Add message to chat
-function addMessage(content, role = 'assistant') {
+// Add message to chat and store in history
+function addMessage(content, role = 'assistant', storeInHistory = true) {
     const msgEl = document.createElement('div');
     msgEl.className = `message ${role}`;
 
+    let textContent = '';
     if (typeof content === 'string') {
         msgEl.innerHTML = `<p>${content}</p>`;
+        // Strip HTML for history storage
+        textContent = content.replace(/<[^>]*>/g, '');
     } else {
         content.forEach(p => {
             const pEl = document.createElement('p');
             pEl.textContent = p;
             msgEl.appendChild(pEl);
         });
+        textContent = content.join('\n');
     }
 
     chatEl.appendChild(msgEl);
     chatEl.scrollTop = chatEl.scrollHeight;
+
+    // Store in chat history for context persistence
+    if (storeInHistory && textContent) {
+        chatHistory.push({ role, content: textContent, timestamp: Date.now() });
+        // Keep last 20 messages to avoid memory bloat
+        if (chatHistory.length > 20) {
+            chatHistory = chatHistory.slice(-20);
+        }
+        console.log('[Panel] Chat history updated:', chatHistory.length, 'messages');
+    }
 }
 
 // Add log entry
@@ -230,8 +250,8 @@ async function handleSend() {
     const text = inputEl.value.trim();
     if (!text) return;
 
-    // Show user message
-    addMessage(text, 'user');
+    // Show user message and store in history
+    addMessage(text, 'user', true);
     inputEl.value = '';
 
     // Refresh context before processing
@@ -256,6 +276,15 @@ async function processUserMessage(text) {
     const API_URL = 'http://localhost:3000/api/ai';
 
     try {
+        // Build conversation history for context (last 10 messages)
+        const recentHistory = chatHistory.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content
+        }));
+
+        // Build agent step history for working memory (last 5 steps)
+        const recentAgentHistory = agentHistory.slice(-5);
+
         const response = await fetch(API_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -264,7 +293,10 @@ async function processUserMessage(text) {
                 data: {
                     message: text,
                     pageContext: contextSummary,
-                    conversationHistory: []
+                    conversationHistory: recentHistory,
+                    agentHistory: recentAgentHistory,
+                    currentUrl: contextSummary?.url,
+                    currentDomain: contextSummary?.domain
                 }
             })
         });
@@ -274,9 +306,24 @@ async function processUserMessage(text) {
             addLog('Got AI response', 'success');
             console.log('[Panel] Agent response:', result);
 
-            // Show the AI's message
+            // Show the AI's message and store in history
             if (result.message) {
-                addMessage(result.message);
+                addMessage(result.message, 'assistant', true);
+            }
+
+            // Store agent step in history if action was taken
+            if (result.action && result.action.type !== 'respond') {
+                agentHistory.push({
+                    stepNumber: agentHistory.length + 1,
+                    action: result.action,
+                    thought: result.thought || 'Executing action',
+                    url: contextSummary?.url,
+                    timestamp: Date.now()
+                });
+                // Keep last 20 agent steps
+                if (agentHistory.length > 20) {
+                    agentHistory = agentHistory.slice(-20);
+                }
             }
 
             // Execute the action if present
@@ -303,7 +350,9 @@ async function executeAgentAction(action) {
     switch (action.type) {
         case 'navigate':
             if (action.url) {
-                addMessage(`🌐 Navigating to: <strong>${action.url}</strong>`);
+                addMessage(`🌐 Navigating to: <strong>${action.url}</strong>`, 'assistant', false);
+                displayActionFeedback({ status: 'started', action: 'navigate', message: `Going to ${action.url}` });
+
                 try {
                     await chrome.tabs.sendMessage(currentTabId, {
                         type: 'EXECUTE_STEP',
@@ -313,19 +362,33 @@ async function executeAgentAction(action) {
                             description: `Opening ${action.url}`
                         }
                     });
-                    addLog('Navigation started', 'success');
 
-                    // Refresh context after navigation
-                    setTimeout(async () => {
+                    // Wait for page to load and verify
+                    const loaded = await waitForPageLoad();
+
+                    if (loaded) {
                         await refreshContext();
                         const newContext = buildContextSummary(currentContext);
-                        if (newContext) {
-                            addMessage(`📍 You're now on: <strong>${newContext.page}</strong>`);
+                        const targetDomain = new URL(action.url).hostname;
+                        const actualDomain = newContext?.domain || '';
+
+                        if (actualDomain.includes(targetDomain) || targetDomain.includes(actualDomain)) {
+                            displayActionFeedback({ status: 'success', action: 'navigate', message: `Loaded ${newContext?.page || action.url}` });
+                            addMessage(`📍 You're now on: <strong>${newContext?.page || action.url}</strong>`, 'assistant', false);
+                            return { success: true, message: `Navigated to ${newContext?.url}` };
+                        } else {
+                            displayActionFeedback({ status: 'observed', action: 'navigate', message: `On ${actualDomain} (expected ${targetDomain})` });
+                            return { success: true, message: `On ${actualDomain}` };
                         }
-                    }, 3000);
+                    } else {
+                        displayActionFeedback({ status: 'failed', action: 'navigate', message: 'Page load timeout' });
+                        return { success: false, message: 'Navigation timeout' };
+                    }
                 } catch (e) {
+                    displayActionFeedback({ status: 'failed', action: 'navigate', message: e.message });
                     addLog('Navigation failed: ' + e.message, 'error');
-                    addMessage(`⚠️ Couldn't navigate automatically. Please visit <a href="${action.url}" target="_blank">${action.url}</a> manually.`);
+                    addMessage(`⚠️ Couldn't navigate automatically. Please visit <a href="${action.url}" target="_blank">${action.url}</a> manually.`, 'assistant', false);
+                    return { success: false, message: e.message };
                 }
             }
             break;
@@ -756,10 +819,11 @@ function handleVoice() {
 
 function handlePause() {
     isPaused = true;
+    loopRunning = false;  // Stop the autonomous loop
     pauseBtn.classList.add('hidden');
     resumeBtn.classList.remove('hidden');
     addLog('Execution paused', 'info');
-    addMessage("⏸️ Paused. Click Resume when you're ready to continue, or Take Control to finish manually.");
+    addMessage("⏸️ Paused. Click Resume when you're ready to continue, or Take Control to finish manually.", 'assistant', false);
 
     chrome.runtime.sendMessage({ type: 'PAUSE', tabId: currentTabId });
 }
@@ -769,17 +833,24 @@ function handleResume() {
     resumeBtn.classList.add('hidden');
     pauseBtn.classList.remove('hidden');
     addLog('Execution resumed', 'info');
-    addMessage("▶️ Resuming...");
+    addMessage("▶️ Resuming...", 'assistant', false);
 
     chrome.runtime.sendMessage({ type: 'RESUME', tabId: currentTabId });
+
+    // Resume the autonomous loop if we had a goal
+    if (currentGoal && !loopRunning) {
+        runAgentLoop(currentGoal);
+    }
 }
 
 function handleTakeover() {
     isExecuting = false;
     isPaused = false;
+    loopRunning = false;  // Stop the autonomous loop
+    currentGoal = null;   // Clear the goal
     controlsEl.classList.add('hidden');
     addLog('User took control', 'info');
-    addMessage("✋ You're now in control. I'll wait here if you need any help.");
+    addMessage("✋ You're now in control. I'll wait here if you need any help.", 'assistant', false);
 
     chrome.runtime.sendMessage({ type: 'TAKE_CONTROL', tabId: currentTabId });
 }
@@ -808,7 +879,7 @@ async function executeStep(step) {
             addLog(`✓ ${step.description}`, 'success');
         } else if (response.paused) {
             addLog(`⏸ Paused: ${step.description}`, 'info');
-            addMessage(`⏸️ <strong>Paused:</strong> ${step.description}`);
+            addMessage(`⏸️ <strong>Paused:</strong> ${step.description}`, 'assistant', false);
         } else {
             addLog(`✗ ${step.description}: ${response.error}`, 'error');
         }
@@ -820,5 +891,208 @@ async function executeStep(step) {
     }
 }
 
+// ============ Continuous Execution Loop ============
+
+/**
+ * Run the autonomous agent loop for a given goal
+ * Executes steps continuously until HITL, completion, or pause
+ */
+async function runAgentLoop(goal) {
+    currentGoal = goal;
+    loopRunning = true;
+    isExecuting = true;
+
+    // Show controls
+    controlsEl.classList.remove('hidden');
+    addLog(`Starting agent loop for goal: ${goal.substring(0, 50)}...`, 'info');
+
+    const maxSteps = 20;  // Safety limit
+    let stepCount = 0;
+
+    while (loopRunning && !isPaused && stepCount < maxSteps) {
+        stepCount++;
+
+        try {
+            // 1. Refresh context
+            await refreshContext();
+            const contextSummary = buildContextSummary(currentContext);
+
+            // 2. Call agent API for next step
+            const result = await callAgentStep(goal, contextSummary);
+
+            if (!result.success) {
+                addLog(`Loop error: ${result.error}`, 'error');
+                break;
+            }
+
+            // 3. Display thought if present
+            if (result.thought) {
+                addLog(`💭 ${result.thought.substring(0, 100)}...`, 'info');
+            }
+
+            // 4. Check for HITL requirement
+            if (result.hitl_required) {
+                displayHITLRequest(result.hitl_required);
+                loopRunning = false;
+                break;
+            }
+
+            // 5. Execute action if present
+            if (result.action && result.action.type !== 'respond') {
+                displayActionFeedback({ status: 'started', action: result.action.type, message: 'Executing...' });
+
+                const execResult = await executeAgentAction(result.action);
+
+                // Update agent history
+                agentHistory.push({
+                    stepNumber: agentHistory.length + 1,
+                    action: result.action,
+                    thought: result.thought,
+                    url: contextSummary?.url,
+                    success: execResult?.success !== false,
+                    timestamp: Date.now()
+                });
+
+                if (agentHistory.length > 20) {
+                    agentHistory = agentHistory.slice(-20);
+                }
+
+                displayActionFeedback({
+                    status: execResult?.success !== false ? 'success' : 'failed',
+                    action: result.action.type,
+                    message: execResult?.message || 'Action completed'
+                });
+            }
+
+            // 6. Check for completion
+            if (result.isDone || result.action?.type === 'respond') {
+                if (result.message) {
+                    addMessage(result.message, 'assistant', true);
+                }
+                addLog('✅ Goal completed', 'success');
+                loopRunning = false;
+                break;
+            }
+
+            // Small delay between steps
+            await delay(800);
+
+        } catch (error) {
+            addLog(`Loop error: ${error.message}`, 'error');
+            loopRunning = false;
+            break;
+        }
+    }
+
+    if (stepCount >= maxSteps) {
+        addLog('⚠️ Max steps reached, pausing for safety', 'warning');
+        addMessage("I've taken " + maxSteps + " steps. Would you like me to continue?", 'assistant', true);
+    }
+
+    isExecuting = false;
+}
+
+/**
+ * Call the agent API for a single step
+ */
+async function callAgentStep(goal, contextSummary) {
+    const API_URL = 'http://localhost:3000/api/ai';
+
+    try {
+        const recentHistory = chatHistory.slice(-10).map(m => ({
+            role: m.role,
+            content: m.content
+        }));
+
+        const response = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                action: 'agent_chat',
+                data: {
+                    message: goal,
+                    pageContext: contextSummary,
+                    conversationHistory: recentHistory,
+                    agentHistory: agentHistory.slice(-5),
+                    currentUrl: contextSummary?.url,
+                    currentDomain: contextSummary?.domain
+                }
+            })
+        });
+
+        if (response.ok) {
+            const result = await response.json();
+            return {
+                success: true,
+                thought: result.thought,
+                action: result.action,
+                message: result.message,
+                hitl_required: result.hitl_required,
+                isDone: result.action?.type === 'respond' || result.isDone
+            };
+        } else {
+            return { success: false, error: 'API returned error' };
+        }
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+}
+
+/**
+ * Display action feedback in the log
+ */
+function displayActionFeedback(result) {
+    const statusMap = {
+        'started': { icon: '⏳', type: 'info' },
+        'success': { icon: '✅', type: 'success' },
+        'failed': { icon: '❌', type: 'error' },
+        'observed': { icon: '👁', type: 'info' }
+    };
+
+    const { icon, type } = statusMap[result.status] || statusMap.started;
+    addLog(`${icon} ${result.action}: ${result.message}`, type);
+}
+
+/**
+ * Display HITL (Human-in-the-Loop) request to user
+ */
+function displayHITLRequest(hitlRequest) {
+    const typeIcons = {
+        'confirmation': '⚠️',
+        'otp': '🔐',
+        'captcha': '🔒',
+        'credentials': '🔑',
+        'ambiguity': '❓'
+    };
+
+    const icon = typeIcons[hitlRequest.type] || '⚠️';
+
+    addMessage(`${icon} <strong>Your input needed:</strong><br>${hitlRequest.reason}`, 'assistant', true);
+
+    if (hitlRequest.options && hitlRequest.options.length > 0) {
+        const optionsList = hitlRequest.options.map((opt, i) => `${i + 1}. ${opt}`).join('<br>');
+        addMessage(`Options:<br>${optionsList}`, 'assistant', false);
+    }
+
+    addLog(`HITL: ${hitlRequest.type} - ${hitlRequest.reason}`, 'info');
+}
+
+/**
+ * Wait for page to finish loading after navigation
+ */
+async function waitForPageLoad() {
+    await delay(500);
+
+    for (let i = 0; i < 10; i++) {
+        await delay(500);
+        await refreshContext();
+        if (currentContext?.browser?.url) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Initialize panel
 init();
+

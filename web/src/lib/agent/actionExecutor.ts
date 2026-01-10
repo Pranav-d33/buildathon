@@ -544,6 +544,205 @@ export class ActionExecutor {
     // ============ Helpers ============
 
     /**
+     * Selector resolution result with confidence scoring
+     */
+    public static readonly SelectorConfidence = {
+        HIGH: 'high' as const,
+        MEDIUM: 'medium' as const,
+        LOW: 'low' as const,
+    };
+
+    /**
+     * Resolve a target to a selector with fallback strategies
+     * Tries: index lookup -> text matching -> aria-label -> coordinates (vision)
+     */
+    async resolveSelector(
+        target: string | number,
+        options: {
+            preferredMethod?: 'index' | 'text' | 'aria' | 'coordinates';
+            affordances?: {
+                links?: Array<{ text: string; selector: string }>;
+                buttons?: Array<{ text: string; selector: string }>;
+                inputs?: Array<{ label: string; selector: string }>;
+            };
+        } = {}
+    ): Promise<{
+        selector: string | null;
+        confidence: 'high' | 'medium' | 'low';
+        fallbackUsed?: 'text' | 'aria' | 'coordinates';
+        coordinates?: { x: number; y: number };
+    }> {
+        // Strategy 1: Index-based (highest confidence)
+        if (typeof target === 'number') {
+            const element = this.context.selectorMap[target];
+            if (element) {
+                return {
+                    selector: this.buildSelector(element),
+                    confidence: 'high',
+                };
+            }
+        }
+
+        // Strategy 2: Direct CSS selector (if target looks like one)
+        if (typeof target === 'string') {
+            const selectorPatterns = [
+                /^#[\w-]+$/,       // ID selector
+                /^\[[\w-]+=.*\]$/, // Attribute selector
+                /^\.[\w-]+$/,      // Class selector
+            ];
+
+            if (selectorPatterns.some(p => p.test(target))) {
+                return {
+                    selector: target,
+                    confidence: 'high',
+                };
+            }
+        }
+
+        // Strategy 3: Text matching in affordances
+        if (typeof target === 'string' && options.affordances) {
+            const targetLower = target.toLowerCase().trim();
+
+            // Check buttons
+            if (options.affordances.buttons) {
+                const match = options.affordances.buttons.find(b =>
+                    b.text.toLowerCase().trim() === targetLower ||
+                    b.text.toLowerCase().includes(targetLower)
+                );
+                if (match) {
+                    return {
+                        selector: match.selector,
+                        confidence: match.text.toLowerCase().trim() === targetLower ? 'high' : 'medium',
+                        fallbackUsed: 'text',
+                    };
+                }
+            }
+
+            // Check links
+            if (options.affordances.links) {
+                const match = options.affordances.links.find(l =>
+                    l.text.toLowerCase().trim() === targetLower ||
+                    l.text.toLowerCase().includes(targetLower)
+                );
+                if (match) {
+                    return {
+                        selector: match.selector,
+                        confidence: match.text.toLowerCase().trim() === targetLower ? 'high' : 'medium',
+                        fallbackUsed: 'text',
+                    };
+                }
+            }
+
+            // Check inputs by label
+            if (options.affordances.inputs) {
+                const match = options.affordances.inputs.find(i =>
+                    i.label.toLowerCase().trim() === targetLower ||
+                    i.label.toLowerCase().includes(targetLower)
+                );
+                if (match) {
+                    return {
+                        selector: match.selector,
+                        confidence: match.label.toLowerCase().trim() === targetLower ? 'high' : 'medium',
+                        fallbackUsed: 'aria',
+                    };
+                }
+            }
+        }
+
+        // Strategy 4: Aria-label attribute selector
+        if (typeof target === 'string') {
+            // Build an aria-label selector
+            const ariaSelector = `[aria-label="${target}"], [aria-label*="${target}"]`;
+            return {
+                selector: ariaSelector,
+                confidence: 'low',
+                fallbackUsed: 'aria',
+            };
+        }
+
+        // Strategy 5: No resolution possible - vision fallback needed
+        return {
+            selector: null,
+            confidence: 'low',
+            fallbackUsed: 'coordinates',
+        };
+    }
+
+    /**
+     * Execute click with intelligent fallback resolution
+     */
+    async executeClickWithFallback(
+        target: string | number,
+        affordances?: {
+            links?: Array<{ text: string; selector: string; position?: { x: number; y: number } }>;
+            buttons?: Array<{ text: string; selector: string; position?: { x: number; y: number } }>;
+        }
+    ): Promise<ActionResult> {
+        const resolution = await this.resolveSelector(target, { affordances });
+
+        if (resolution.selector) {
+            // Try the resolved selector
+            const response = await this.context.sendToExtension({
+                type: 'EXECUTE_ACTION',
+                payload: {
+                    action: 'click',
+                    selector: resolution.selector,
+                },
+            });
+
+            if (response.success) {
+                return createActionResult({
+                    metadata: {
+                        action: 'click',
+                        target,
+                        confidence: resolution.confidence,
+                        fallbackUsed: resolution.fallbackUsed,
+                    },
+                });
+            }
+
+            // If selector failed but we have coordinates from affordances, try coordinate click
+            if (resolution.fallbackUsed === 'text' && affordances) {
+                const allElements = [...(affordances.links || []), ...(affordances.buttons || [])];
+                const matchedEl = allElements.find(el => el.selector === resolution.selector);
+
+                if (matchedEl?.position) {
+                    const coordResponse = await this.context.sendToExtension({
+                        type: 'EXECUTE_ACTION',
+                        payload: {
+                            action: 'click',
+                            coordinates: {
+                                x: matchedEl.position.x + 10,
+                                y: matchedEl.position.y + 10
+                            },
+                        },
+                    });
+
+                    return createActionResult({
+                        error: coordResponse.success ? null : coordResponse.error,
+                        metadata: {
+                            action: 'click',
+                            target,
+                            confidence: 'low',
+                            fallbackUsed: 'coordinates',
+                        },
+                    });
+                }
+            }
+
+            return createActionResult({
+                error: response.error || `Click failed for target: ${target}`,
+                metadata: { action: 'click', target, resolution },
+            });
+        }
+
+        return createActionResult({
+            error: `Could not resolve target: ${target}`,
+            metadata: { action: 'click', target, needsVision: true },
+        });
+    }
+
+    /**
      * Build a CSS selector for an element
      */
     private buildSelector(element: EnhancedDOMTreeNode): string {
